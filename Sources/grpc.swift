@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import Protobuf
+import SwiftProtobuf
 
 public class GRPC<T: ProtobufMessage> {
 
@@ -56,20 +56,21 @@ public class GRPC<T: ProtobufMessage> {
             ("content-type", "application/grpc+proto"),
             ("user-agent", "grpc-swift/1.0"),
             ("te", "trailers"),
-            ]
+        ]
         HttpFrame.send(headers: headers, flags: flags, stream: stream).write(to: task)
         return self
     }
 
+    // TODO: Where should these go?
     func handleHeader(frame: HttpFrame) {
         let decoder = HPACKDecoder()
         let listener = HttpHeaderDecoder()
         let bytes = Bytes(existingBytes: frame.payload ?? [])
         do {
             try decoder.decode(input: bytes, headerListener: listener)
-            print(listener.headers)
+            // print(listener.headers)
         } catch {
-            print(error, listener.headers)
+            // print(error, listener.headers)
         }
     }
 
@@ -96,7 +97,7 @@ public class UnaryClient<T: ProtobufMessage>: GRPC<T> {
     }
 
     @discardableResult
-    public func with(data: ProtobufMessage, stream: UInt32, flags: HttpFlag = 0, then: @escaping ResponseHandler) -> Self {
+    public func with(data: T, stream: UInt32, flags: HttpFlag = 0, then: @escaping ResponseHandler) -> Self {
         task.readData(ofMinLength: 0, maxLength: 1024, timeout: 0) { (data, isEOF, error) in
             let frames = HttpFrame.read(data)
             for frame in frames {
@@ -107,7 +108,8 @@ public class UnaryClient<T: ProtobufMessage>: GRPC<T> {
                 }
             }
         }
-        HttpFrame.send(protobuf: data, flags: flags, stream: stream).write(to: task)
+        let bytes = try? data.serializeProtobufBytes()
+        HttpFrame.send(bytes: bytes ?? [], flags: flags, stream: stream).write(to: task)
         return self
     }
 }
@@ -122,7 +124,7 @@ public class StreamClient<T: ProtobufMessage>: GRPC<T> {
     }
 
     @discardableResult
-    public func with(data: ProtobufMessage, stream: UInt32, flags: HttpFlag = 0) -> Self {
+    public func with(data: T, stream: UInt32, flags: HttpFlag = 0) -> Self {
         task.readData(ofMinLength: 0, maxLength: 1024, timeout: 0) { (data, isEOF, error) in
             let frames = HttpFrame.read(data)
             for frame in frames {
@@ -133,7 +135,8 @@ public class StreamClient<T: ProtobufMessage>: GRPC<T> {
                 }
             }
         }
-        HttpFrame.send(protobuf: data, flags: flags, stream: stream).write(to: task)
+        let bytes = try? data.serializeProtobufBytes()
+        HttpFrame.send(bytes: bytes ?? [], flags: flags, stream: stream).write(to: task)
         return self
     }
 }
