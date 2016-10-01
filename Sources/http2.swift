@@ -7,7 +7,6 @@
 //
 
 import Foundation
-import Protobuf
 
 let isLittleEndian = Int(OSHostByteOrder()) == OSLittleEndian
 let htonl  = isLittleEndian ? _OSSwapInt32 : { $0 } // host-to-network-long
@@ -153,16 +152,15 @@ public struct HttpFrame: CustomStringConvertible {
         return HttpFrame(length: UInt32(bytes.count), type: .headers, flags: flags, streamId: stream, payload: bytes)
     }
 
-    public static func send(protobuf: ProtobufMessage, flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
-        var bytes: [UInt8] = [0, 0, 0, 0] // Need this prefix for some reason
+    public static func send(bytes: [UInt8], flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
+        var out: [UInt8] = [0, 0, 0, 0] // TODO: Do these need to be set?
         do {
-            let proto = try protobuf.serializeProtobufBytes()
-            bytes += [UInt8(proto.count)]
-            bytes += proto
+            out += [UInt8(bytes.count)]
+            out += bytes
         } catch {
             fatalError("\(error)")
         }
-        return HttpFrame(length: UInt32(bytes.count), type: .data, flags: flags, streamId: stream, payload: bytes)
+        return HttpFrame(length: UInt32(bytes.count), type: .data, flags: flags, streamId: stream, payload: out)
     }
 
     // Read
