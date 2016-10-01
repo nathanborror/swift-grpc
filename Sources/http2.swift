@@ -54,12 +54,12 @@ public enum HttpStreamState {
 
 public typealias HttpFlag = UInt8
 extension HttpFlag {
-    static let endStream: HttpFlag   = 1
-    static let settingsAck: HttpFlag = 1
-    static let pingAck: HttpFlag     = 1
-    static let endHeaders: HttpFlag  = 4
-    static let padded: HttpFlag      = 8
-    static let priority: HttpFlag    = 20
+    public static let endStream: HttpFlag   = 1
+    public static let settingsAck: HttpFlag = 1
+    public static let pingAck: HttpFlag     = 1
+    public static let endHeaders: HttpFlag  = 4
+    public static let padded: HttpFlag      = 8
+    public static let priority: HttpFlag    = 20
 }
 
 public struct HttpFrame: CustomStringConvertible {
