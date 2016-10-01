@@ -24,7 +24,7 @@ message HelloResponse {
 
 Build protobuf file with [swift-protobuf-plugin](https://github.com/apple/swift-protobuf-plugin) and whatever server-side plugin of your choosing, here I'm using Go:
 
-  $ protoc --swift_out=YourSwiftClient/Sources --go_out=plugins=grpc:. your-protobuf-file.proto
+    $ protoc --swift_out=YourSwiftClient/Sources --go_out=plugins=grpc:. your-protobuf-file.proto
 
 Fill out gRPC service methods in your swift client:
 
