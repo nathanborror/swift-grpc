@@ -1,23 +1,26 @@
+//
+//  SwiftGRPC/Sources/gRPC.swift - GRPC Client
+//
+//  This source file is part of the SwiftGRPC open source project
+//  https://github.com/nathanborror/swift-grpc
+//  Created by Nathan Borror on 10/1/16.
+//
+
 import Foundation
 import Protobuf
 
-public class GRPCClient<T: ProtobufMessage> {
+public class GRPC<T: ProtobufMessage> {
 
-    public typealias Callback = (T?, Error?) -> Void
+    public typealias ResponseHandler = (() throws -> T) -> Void
 
     let session: URLSession
     let scheme: String
     let host: String
     let port: Int
 
-    var task: URLSessionStreamTask?
-    var stream: UInt32?
-    var method: String = "POST"
+    var task: URLSessionStreamTask
 
     private var streams: HttpStream
-    private var streamCallbacks = [UInt32: Callback?]()
-    private var streamCallback: Callback?
-
     private let timeout: TimeInterval = 0
     private let minReadLength: Int = 0
     private let maxReadLength: Int = 1024
@@ -25,94 +28,112 @@ public class GRPCClient<T: ProtobufMessage> {
     public init(url: String) {
         guard let url = URL(string: url) else { fatalError() }
         self.session = URLSession(configuration: .default)
-        self.streams = HttpStream()
+        self.scheme = url.scheme ?? "http"
         self.host = url.host ?? ""
         self.port = url.port ?? 80
-        self.scheme = url.scheme ?? "http"
+        self.streams = HttpStream()
+
         self.task = session.streamTask(withHostName: host, port: port)
+        self.task.resume()
+
+        HttpFrame.preface(task: task)
+        HttpFrame.settings(flags: .settingsAck).write(to: task)
     }
 
-    public convenience init(url: String, streamTo callback: @escaping Callback) {
-        self.init(url: url)
-        streamCallback = callback
-    }
-
-    public func get(_ path: String, flags: HttpFlag = 0) -> GRPCClient {
-        method = "GET"
-        return call(path, flags: flags)
-    }
-
-    public func post(_ path: String, flags: HttpFlag = 0) -> GRPCClient {
-        method = "POST"
-        return call(path, flags: flags)
+    public func newStream() -> UInt32 {
+        let streamId = streams.new()
+        streams.streams[streamId] = .idle
+        return streamId
     }
 
     @discardableResult
-    public func call(_ path: String, flags: HttpFlag = 0) -> GRPCClient {
-        stream = newStream()
-
-        guard let task = task, let stream = stream else { return self }
-        if task.state != .running {
-            start()
-        }
-
+    public func call(path: String, stream: UInt32, flags: HttpFlag = .endHeaders) -> Self {
         let headers = [
-            (":method", method),
+            (":method", "POST"),
             (":scheme", scheme),
             (":path", path),
             (":authority", host),
             ("content-type", "application/grpc+proto"),
             ("user-agent", "grpc-swift/1.0"),
             ("te", "trailers"),
-        ]
-        HttpFrame.header(task: task, headers: headers, flags: flags, stream: stream)
+            ]
+        HttpFrame.send(headers: headers, flags: flags, stream: stream).write(to: task)
         return self
+    }
+
+    func handleHeader(frame: HttpFrame) {
+        let decoder = HPACKDecoder()
+        let listener = HttpHeaderDecoder()
+        let bytes = Bytes(existingBytes: frame.payload ?? [])
+        do {
+            try decoder.decode(input: bytes, headerListener: listener)
+            print(listener.headers)
+        } catch {
+            print(error, listener.headers)
+        }
+    }
+
+    func handleData(frame: HttpFrame, then: @escaping ResponseHandler) {
+        let b = Array(frame.payload![5..<frame.payload!.count])
+        let data = Data(bytes: b, count: b.count)
+        do {
+            let out = try T(protobuf: data)
+            then { return out }
+        } catch {
+            then { throw error }
+        }
+    }
+
+    func close() {
+        task.closeWrite()
+    }
+}
+
+public class UnaryClient<T: ProtobufMessage>: GRPC<T> {
+
+    public override init(url: String) {
+        super.init(url: url)
     }
 
     @discardableResult
-    public func data(_ data: ProtobufMessage, flags: HttpFlag = 0, callback: Callback? = nil) -> GRPCClient {
-        guard let task = task, let stream = stream else { return self }
-
-        streamCallbacks[stream] = (streamCallback != nil) ? streamCallback : callback
-
+    public func with(data: ProtobufMessage, stream: UInt32, flags: HttpFlag = 0, then: @escaping ResponseHandler) -> Self {
         task.readData(ofMinLength: 0, maxLength: 1024, timeout: 0) { (data, isEOF, error) in
-            self.completion(data: data, isEOF: isEOF, error: error)
-        }
-        HttpFrame.data(task: task, protobuf: data, flags: flags, stream: stream)
-        return self
-    }
-
-    private func completion(data: Data?, isEOF: Bool, error: Error?) {
-        let frames = HttpFrame.read(data)
-        for frame in frames {
-            switch frame.type {
-            case .data:
-                guard let callback = streamCallbacks[frame.streamId] else { return }
-                let b = Array(frame.payload![5..<frame.payload!.count])
-                let data = Data(bytes: b, count: b.count)
-                do {
-                    let out = try T(protobuf: data)
-                    callback?(out, nil)
-                } catch { callback?(nil, error) }
-            default: break
+            let frames = HttpFrame.read(data)
+            for frame in frames {
+                switch frame.type {
+                case .data:     self.handleData(frame: frame, then: then)
+                case .headers:  self.handleHeader(frame: frame)
+                default:        continue
+                }
             }
         }
+        HttpFrame.send(protobuf: data, flags: flags, stream: stream).write(to: task)
+        return self
+    }
+}
+
+public class StreamClient<T: ProtobufMessage>: GRPC<T> {
+
+    let callback: ResponseHandler
+
+    public init(url: String, callback: @escaping ResponseHandler) {
+        self.callback = callback
+        super.init(url: url)
     }
 
-    private func newStream() -> UInt32 {
-        let streamId = streams.new()
-        streams.streams[streamId] = .idle
-        return streamId
-    }
-
-    private func start() {
-        guard let task = task else { return }
-        task.resume()
-        HttpFrame.preface(task: task)
-        HttpFrame.settings(task: task, flags: .settingsAck)
-    }
-
-    private func close() {
-        task?.closeWrite()
+    @discardableResult
+    public func with(data: ProtobufMessage, stream: UInt32, flags: HttpFlag = 0) -> Self {
+        task.readData(ofMinLength: 0, maxLength: 1024, timeout: 0) { (data, isEOF, error) in
+            let frames = HttpFrame.read(data)
+            for frame in frames {
+                switch frame.type {
+                case .data:     self.handleData(frame: frame, then: self.callback)
+                case .headers:  self.handleHeader(frame: frame)
+                default:        continue
+                }
+            }
+        }
+        HttpFrame.send(protobuf: data, flags: flags, stream: stream).write(to: task)
+        return self
     }
 }

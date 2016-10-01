@@ -1,3 +1,11 @@
+//
+//  SwiftGRPC/Sources/Http2.swift - HTTP/2 Library
+//
+//  This source file is part of the SwiftGRPC open source project
+//  https://github.com/nathanborror/swift-grpc
+//  Created by Nathan Borror on 10/1/16.
+//
+
 import Foundation
 import Protobuf
 
@@ -112,56 +120,49 @@ public struct HttpFrame: CustomStringConvertible {
         return "\(type)(length: \(length), flags: \(flags, flagsStr), stream: \(streamId), payload: \(payload?.count ?? 0) bytes)"
     }
 
+    public func write(to task: URLSessionStreamTask) {
+        let handler: (Error?) -> Void = {
+            if $0 != nil { print($0) }
+        }
+        task.write(self.data, timeout: 0, completionHandler: handler)
+        guard let payload = payload else { return }
+        task.write(Data(bytes: payload, count: payload.count), timeout: 0, completionHandler: handler)
+    }
+
     // Frame Factories
 
     public static func preface(task: URLSessionStreamTask) {
         let prefaceData = HttpRequest.preface.data(using: String.Encoding.ascii)!
-        task.write(prefaceData, timeout: 0, completionHandler: handleError)
+        task.write(prefaceData, timeout: 0) {
+            if $0 != nil { print($0) }
+        }
     }
 
-    public static func settings(task: URLSessionStreamTask, flags: HttpFlag = 0, stream: UInt32 = 0) {
-        let frame = HttpFrame(length: 0, type: .settings, flags: flags, streamId: stream, payload: nil)
-        task.write(frame.data, timeout: 0, completionHandler: handleError)
+    public static func settings(flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
+        return HttpFrame(length: 0, type: .settings, flags: flags, streamId: stream, payload: nil)
     }
 
-    public static func windowUpdate(task: URLSessionStreamTask, flags: HttpFlag = 0, stream: UInt32 = 0) {
+    public static func windowUpdate(flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
         let windowData = Bytes()
         windowData.import32Bits(from: UInt32(983025))
-        let frame = HttpFrame(length: UInt32(windowData.data.count), type: .windowUpdate, flags: flags, streamId: stream, payload: windowData.data)
-        task.write(frame.data, timeout: 0, completionHandler: handleError)
-        task.write(Data(bytes: frame.payload!, count: frame.payload!.count), timeout: 0, completionHandler: handleError)
+        return HttpFrame(length: UInt32(windowData.data.count), type: .windowUpdate, flags: flags, streamId: stream, payload: windowData.data)
     }
 
-    public static func header(task: URLSessionStreamTask, headers: [(String, String)], flags: HttpFlag = 0, stream: UInt32 = 0) {
+    public static func send(headers: [(String, String)], flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
         let bytes = HttpRequest.set(headers: headers)
-        let frame = HttpFrame(length: UInt32(bytes.count), type: .headers, flags: flags, streamId: stream, payload: bytes)
-        task.write(frame.data, timeout: 0, completionHandler: handleError)
-        task.write(Data(bytes: bytes, count: bytes.count), timeout: 0, completionHandler: handleError)
+        return HttpFrame(length: UInt32(bytes.count), type: .headers, flags: flags, streamId: stream, payload: bytes)
     }
 
-    public static func data(task: URLSessionStreamTask, protobuf: ProtobufMessage, flags: HttpFlag = 0, stream: UInt32 = 0) {
-        var out = Data()
+    public static func send(protobuf: ProtobufMessage, flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
         var bytes: [UInt8] = [0, 0, 0, 0] // Need this prefix for some reason
         do {
             let proto = try protobuf.serializeProtobufBytes()
             bytes += [UInt8(proto.count)]
             bytes += proto
         } catch {
-            print(error)
-            return
+            fatalError("\(error)")
         }
-        let frame = HttpFrame(length: UInt32(bytes.count), type: .data, flags: flags, streamId: stream, payload: bytes)
-
-        out.append(frame.data)
-        out.append(Data(bytes: bytes, count: bytes.count))
-
-        task.write(out, timeout: 0, completionHandler: handleError)
-    }
-
-    static func handleError(error: Error?) {
-        if error != nil {
-            print(error)
-        }
+        return HttpFrame(length: UInt32(bytes.count), type: .data, flags: flags, streamId: stream, payload: bytes)
     }
 
     // Read
@@ -181,12 +182,12 @@ public struct HttpFrame: CustomStringConvertible {
 
 class HttpHeaderDecoder: HeaderListener {
 
-    var headers = "\n"
+    var headers = [(String, String, Bool)]()
 
     func addHeader(name: [UInt8], value: [UInt8], sensitive: Bool) {
         let nameStr = String(bytes: name, encoding: .utf8)!
         let valueStr = String(bytes: value, encoding: .utf8)!
-        headers += "\t\(nameStr): \(valueStr)\n"
+        headers.append((nameStr, valueStr, sensitive))
     }
 }
 
