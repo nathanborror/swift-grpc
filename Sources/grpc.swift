@@ -97,7 +97,7 @@ public class UnaryClient<T: ProtobufMessage>: GRPC<T> {
     }
 
     @discardableResult
-    public func with(data: T, stream: UInt32, flags: HttpFlag = 0, then: @escaping ResponseHandler) -> Self {
+    public func with(data: ProtobufMessage, stream: UInt32, flags: HttpFlag = 0, then: @escaping ResponseHandler) -> Self {
         task.readData(ofMinLength: 0, maxLength: 1024, timeout: 0) { (data, isEOF, error) in
             let frames = HttpFrame.read(data)
             for frame in frames {
@@ -124,7 +124,7 @@ public class StreamClient<T: ProtobufMessage>: GRPC<T> {
     }
 
     @discardableResult
-    public func with(data: T, stream: UInt32, flags: HttpFlag = 0) -> Self {
+    public func with(data: ProtobufMessage, stream: UInt32, flags: HttpFlag = 0) -> Self {
         task.readData(ofMinLength: 0, maxLength: 1024, timeout: 0) { (data, isEOF, error) in
             let frames = HttpFrame.read(data)
             for frame in frames {
