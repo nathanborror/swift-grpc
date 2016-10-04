@@ -26,32 +26,25 @@ Build protobuf file with [swift-protobuf-plugin](https://github.com/apple/swift-
 
     $ protoc --swift_out=YourSwiftClient/Sources --go_out=plugins=grpc:. your-protobuf-file.proto
 
-Fill out gRPC service methods in your swift client:
+Quick and scrappy example:
 
 ```swift
 import Foundation
-import SwiftGRPC
 
-class HelloService {
-  
-  let client = GRPCClient<HelloResponse>(url: "http://localhost:8080")
+let url = URL(string: "http://localhost:8080")!
+let grpc = GRPC(url: url)
 
-  func send(inbound: HelloRequest, callback: @escaping (HelloResponse?, Error?) -> Void) {
-    client.post("/HelloService/Send", flags: .endHeaders)
-      .data(inbound, flags: 0, callback: callback)
-  }
+while !grpc.isConnected {
+    sleep(1)
 }
-```
 
-Use service:
-
-```swift
-let service = HelloService()
-
-let hello = HelloRequest(text: "Hello gRPC!")
-service.send(inbound: hello) { account, error in
-  print(account)
+let hello = HelloRequest(text: "Hello, World")
+grpc.write(path: "/HelloService/Send", data: hello) { (bytes) in
+    let resp = try? HelloResponse(protobufBytes: bytes)
+    print(resp)
 }
+
+sleep(5)
 ```
 
 Stay tuned 📺
