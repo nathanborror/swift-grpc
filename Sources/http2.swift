@@ -7,48 +7,11 @@
 //
 
 import Foundation
+import hpack
 
-let isLittleEndian = Int(OSHostByteOrder()) == OSLittleEndian
-let htonl  = isLittleEndian ? _OSSwapInt32 : { $0 } // host-to-network-long
+// Streams
 
-public enum HttpFrameType: UInt8, CustomStringConvertible {
-    case data           = 0
-    case headers        = 1
-    case priority       = 2
-    case rstStream      = 3
-    case settings       = 4
-    case pushPromise    = 5
-    case ping           = 6
-    case goaway         = 7
-    case windowUpdate   = 8
-    case continuation   = 9
-
-    public var description: String {
-        switch self {
-        case .data:         return "HTTP2_DATA"
-        case .headers:      return "HTTP2_HEADERS"
-        case .priority:     return "HTTP2_PRIORITY"
-        case .rstStream:    return "HTTP2_RST_STREAM"
-        case .settings:     return "HTTP2_SETTINGS"
-        case .pushPromise:  return "HTTP2_PUSH_PROMISE"
-        case .ping:         return "HTTP2_PING"
-        case .goaway:       return "HTTP2_GOAWAY"
-        case .windowUpdate: return "HTTP2_WINDOW_UPDATE"
-        case .continuation: return "HTTP2_CONTINUATION"
-        }
-    }
-}
-
-public enum HttpSettings: UInt16 {
-    case headerTableSize        = 1
-    case enablePush             = 2
-    case maxConcurrentStreams   = 3
-    case initialWindowSize      = 4
-    case maxFrameSize           = 5
-    case maxHeaderListSize      = 6
-}
-
-public enum HttpStreamState {
+enum StreamState {
     case none
     case idle
     case reservedLocal
@@ -59,192 +22,327 @@ public enum HttpStreamState {
     case closed
 }
 
-public typealias HttpFlag = UInt8
-extension HttpFlag {
-    public static let endStream: HttpFlag   = 1
-    public static let settingsAck: HttpFlag = 1
-    public static let pingAck: HttpFlag     = 1
-    public static let endHeaders: HttpFlag  = 4
-    public static let padded: HttpFlag      = 8
-    public static let priority: HttpFlag    = 20
-}
-
-public struct HttpFrame: CustomStringConvertible {
-    let length:     UInt32
-    let type:       HttpFrameType
-    let flags:      HttpFlag
-    let streamId:   UInt32
-
-    var payload:    [UInt8]?
-
-    var flagsStr: String {
-        var s = ""
-        if flags == 0 {
-            s.append("NO FLAGS")
-        }
-        if (flags & HttpFlag.endStream) != 0 {
-            s.append("+HTTP2_END_STREAM")
-        }
-        if (flags & HttpFlag.endHeaders) != 0 {
-            s.append("+HTTP2_END_HEADERS")
-        }
-        return s
-    }
-
-    public var bytes: [UInt8] {
-        var data = [UInt8]()
-
-        let l = htonl(length) >> 8
-        data.append(UInt8(l & 0xFF))
-        data.append(UInt8((l >> 8) & 0xFF))
-        data.append(UInt8((l >> 16) & 0xFF))
-
-        data.append(type.rawValue)
-        data.append(flags)
-
-        let s = htonl(streamId)
-        data.append(UInt8(s & 0xFF))
-        data.append(UInt8((s >> 8) & 0xFF))
-        data.append(UInt8((s >> 16) & 0xFF))
-        data.append(UInt8((s >> 24) & 0xFF))
-        return data
-    }
-
-    public var data: Data {
-        let b = self.bytes
-        return Data(bytes: b, count: b.count)
-    }
-
-    public var description: String {
-        return "\(type)(length: \(length), flags: \(flags, flagsStr), stream: \(streamId), payload: \(payload?.count ?? 0) bytes)"
-    }
-
-    public func write(to task: URLSessionStreamTask) {
-        let handler: (Error?) -> Void = {
-            if $0 != nil { print($0) }
-        }
-        task.write(self.data, timeout: 0, completionHandler: handler)
-        guard let payload = payload else { return }
-        task.write(Data(bytes: payload, count: payload.count), timeout: 0, completionHandler: handler)
-    }
-
-    // Frame Factories
-
-    public static func preface(task: URLSessionStreamTask) {
-        let prefaceData = HttpRequest.preface.data(using: String.Encoding.ascii)!
-        task.write(prefaceData, timeout: 0) {
-            if $0 != nil { print($0) }
-        }
-    }
-
-    public static func settings(flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
-        return HttpFrame(length: 0, type: .settings, flags: flags, streamId: stream, payload: nil)
-    }
-
-    public static func windowUpdate(flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
-        let windowData = Bytes()
-        windowData.import32Bits(from: UInt32(983025))
-        return HttpFrame(length: UInt32(windowData.data.count), type: .windowUpdate, flags: flags, streamId: stream, payload: windowData.data)
-    }
-
-    public static func send(headers: [(String, String)], flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
-        let bytes = HttpRequest.set(headers: headers)
-        return HttpFrame(length: UInt32(bytes.count), type: .headers, flags: flags, streamId: stream, payload: bytes)
-    }
-
-    public static func send(bytes: [UInt8], flags: HttpFlag = 0, stream: UInt32 = 0) -> HttpFrame {
-        var out: [UInt8] = [0, 0, 0, 0] // TODO: Do these need to be set?
-        do {
-            out += [UInt8(bytes.count)]
-            out += bytes
-        } catch {
-            fatalError("\(error)")
-        }
-        return HttpFrame(length: UInt32(bytes.count), type: .data, flags: flags, streamId: stream, payload: out)
-    }
-
-    // Read
-
-    public static func read(_ data: Data?) -> [HttpFrame] {
-        guard let data = data else { return [] }
-        var frames = [HttpFrame]()
-        var bytes = [UInt8](data)
-        while bytes.count > 0 {
-            let (frame, remaining) = HttpResponse.process(bytes: bytes)
-            frames.append(frame)
-            bytes = remaining
-        }
-        return frames
-    }
-}
-
-class HttpHeaderDecoder: HeaderListener {
-
-    var headers = [(String, String, Bool)]()
-
-    func addHeader(name: [UInt8], value: [UInt8], sensitive: Bool) {
-        let nameStr = String(bytes: name, encoding: .utf8)!
-        let valueStr = String(bytes: value, encoding: .utf8)!
-        headers.append((nameStr, valueStr, sensitive))
-    }
-}
-
-public struct HttpRequest {
-
-    static let preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
-
-    public static func set(headers: [(String, String)]) -> [UInt8] {
-        let bytes = Bytes()
-        let encoder = HPACKEncoder()
-        do {
-            for (name, value) in headers {
-                try encoder.encodeHeader(out: bytes, name: name, value: value)
-            }
-        } catch {
-            print(error)
-        }
-        return bytes.data
-    }
-}
-
-public struct HttpResponse {
-
-    public static func parse(bytes b: [UInt8]) -> HttpFrame {
-        let length = (UInt32(b[0]) << 16) + (UInt32(b[1]) << 8) + UInt32(b[2])
-        let type = HttpFrameType(rawValue: b[3])!
-        let flags = b[4]
-        var sid: UInt32 = UInt32(b[5])
-        sid <<= 8
-        sid += UInt32(b[6])
-        sid <<= 8
-        sid += UInt32(b[7])
-        sid <<= 8
-        sid += UInt32(b[8])
-        sid &= ~0x80000000
-        return HttpFrame(length: length, type: type, flags: flags, streamId: sid, payload: nil)
-    }
-
-    public static func process(bytes b: [UInt8]) -> (HttpFrame, [UInt8]) {
-        var frame = HttpResponse.parse(bytes: b)
-        if frame.length > 0 {
-            let len = 9 + Int(frame.length)
-            frame.payload = Array(b[9..<len])
-        }
-        let offset = 9 + (frame.payload?.count ?? 0)
-        let bytes = Array(b[offset..<b.count])
-        return (frame, bytes)
-    }
-}
-
-public struct HttpStream {
-
-    var streams = [UInt32: HttpStreamState]()
-    var counter = UInt32(1)
-
-    public mutating func new() -> UInt32 {
+public typealias StreamID = Int
+public struct StreamCache {
+    
+    var streams = [Int: StreamState]()
+    var counter = 1
+    
+    public mutating func next() -> StreamID {
         streams[counter] = .none
         let s = counter
         counter += 2
         return s
     }
 }
+
+// Frames
+
+public enum FrameType: UInt8 {
+    case data           = 0
+    case headers        = 1
+    case priority       = 2
+    case rstStream      = 3
+    case settings       = 4
+    case pushPromise    = 5
+    case ping           = 6
+    case goaway         = 7
+    case windowUpdate   = 8
+    case continuation   = 9
+}
+
+public typealias FrameFlag = UInt8
+extension FrameFlag {
+    public static let endStream: FrameFlag   = 1
+    public static let settingsAck: FrameFlag = 1
+    public static let pingAck: FrameFlag     = 1
+    public static let endHeaders: FrameFlag  = 4
+    public static let padded: FrameFlag      = 8
+    public static let priority: FrameFlag    = 20
+}
+
+public struct Frame {
+    public let type:    FrameType
+    public let stream:  StreamID
+    public let flags:   FrameFlag
+    public let length:  Int
+    public var payload: [UInt8]?
+    
+    public init(type: FrameType, stream: StreamID = 0, flags: FrameFlag = 0, length: Int = 0, payload: [UInt8]? = nil) {
+        self.type = type
+        self.stream = stream
+        self.flags = flags
+        self.length = length
+        self.payload = payload
+    }
+    
+    public init(headers: [(String, String)], stream: StreamID = 0, flags: FrameFlag = 0) {
+        self.type = .headers
+        self.stream = stream
+        self.flags = flags
+        
+        let encoder = hpack.Encoder()
+        let payload = encoder.encode(headers)
+        
+        self.payload = payload
+        self.length = payload.count
+    }
+    
+    public init(data: [UInt8], stream: StreamID = 0, flags: FrameFlag = 0) {
+        self.type = .data
+        self.stream = stream
+        self.flags = flags
+        self.payload = data
+        self.length = data.count
+    }
+    
+    public init?(bytes: [UInt8]) {
+        guard bytes.count >= 9 else { return nil }
+        let length = (UInt32(bytes[0]) << 16) + (UInt32(bytes[1]) << 8) + UInt32(bytes[2])
+        self.length = Int(length)
+        guard let type = FrameType(rawValue: bytes[3]) else {
+            return nil
+        }
+        self.type = type
+        self.flags = bytes[4]
+        var stream = UInt32(bytes[5])
+        stream <<= 8
+        stream += UInt32(bytes[6])
+        stream <<= 8
+        stream += UInt32(bytes[7])
+        stream <<= 8
+        stream += UInt32(bytes[8])
+        stream &= ~0x80000000
+        self.stream = Int(stream)
+        self.payload = nil
+    }
+    
+    public func bytes() -> [UInt8] {
+        var data = [UInt8]()
+        
+        let l = htonl(UInt32(self.length)) >> 8
+        data.append(UInt8(l & 0xFF))
+        data.append(UInt8((l >> 8) & 0xFF))
+        data.append(UInt8((l >> 16) & 0xFF))
+        
+        data.append(self.type.rawValue)
+        data.append(self.flags)
+        
+        let s = htonl(UInt32(self.stream))
+        data.append(UInt8(s & 0xFF))
+        data.append(UInt8((s >> 8) & 0xFF))
+        data.append(UInt8((s >> 16) & 0xFF))
+        data.append(UInt8((s >> 24) & 0xFF))
+        return data
+    }
+}
+
+// Client Delegate
+
+public protocol Http2Delegate: class {
+    func clientConnected(http: Http2)
+    func client(http: Http2, hasFrame frame: Frame)
+}
+
+// Client
+
+public class Http2: NSObject {
+    
+    private let url: URL
+    
+    public var delegate: Http2Delegate?
+    
+    var inputStream: InputStream?
+    var outputStream: OutputStream?
+    
+    var isConnected = false
+    var isConnecting = false
+    var isReadyToWrite = false {
+        didSet { if isReadyToWrite { writeHandshake() }}
+    }
+    
+    private var inputQueue: [UInt8]
+    private let writeQueue: OperationQueue
+    private var fragBuffer: Data?
+    
+    private static let sharedQueue = DispatchQueue(label: "com.nathanborror.grpc.http2", attributes: [])
+    
+    public var streams: StreamCache
+    
+    public init(url: URL) {
+        self.url = url
+        self.writeQueue = OperationQueue()
+        self.writeQueue.maxConcurrentOperationCount = 1
+        self.inputQueue = []
+        self.streams = StreamCache()
+    }
+    
+    public func connect() {
+        guard !isConnecting else { return }
+        isConnecting = true
+        attemptConnection()
+        isConnecting = false
+    }
+    
+    func attemptConnection() {
+        guard let req = makeRequest() else {
+            print("HTTP/2 connection attempt failed")
+            return
+        }
+        makeStreams(with: req)
+    }
+    
+    func makeRequest() -> Data? {
+        let req = CFHTTPMessageCreateEmpty(kCFAllocatorDefault, true).takeRetainedValue()
+        
+        CFHTTPMessageAppendBytes(req, prism, prism.count)
+        
+        // TODO: Figure out how to get rid of the above without having
+        // CFHTTPMessageCopySerializedMessage returning nil.
+        
+        guard let cfData = CFHTTPMessageCopySerializedMessage(req) else {
+            print("CFHTTPMessageCopySerializedMessage returned nil")
+            return nil
+        }
+        return cfData.takeRetainedValue() as Data
+    }
+    
+    func makeStreams(with request: Data) {
+        var readStream: Unmanaged<CFReadStream>?
+        var writeStream: Unmanaged<CFWriteStream>?
+        
+        guard let host = url.host,
+            let port = url.port else { fatalError() }
+        
+        CFStreamCreatePairWithSocketToHost(nil, host as CFString, UInt32(port), &readStream, &writeStream)
+        
+        inputStream = readStream!.takeRetainedValue()
+        outputStream = writeStream!.takeRetainedValue()
+        
+        guard let input = inputStream,
+            let output = outputStream else { fatalError() }
+        
+        input.delegate = self
+        output.delegate = self
+        
+        CFReadStreamSetDispatchQueue(input, Http2.sharedQueue)
+        CFWriteStreamSetDispatchQueue(output, Http2.sharedQueue)
+        
+        input.open()
+        output.open()
+    }
+    
+    func writeHandshake() {
+        var out = [UInt8]()
+        out += prism
+        out += settings
+        write(bytes: out)
+        delegate?.clientConnected(http: self)
+    }
+    
+    lazy var prism: [UInt8] = {
+        return [UInt8]("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".utf8)
+    }()
+    
+    lazy var settings: [UInt8] = {
+        return Frame(type: .settings).bytes()
+    }()
+    
+    func processInput() {
+        guard let input = inputStream else { return }
+        
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let read = input.read(&buffer, maxLength: buffer.count)
+        inputQueue += Array(buffer[0..<read])
+        
+        dequeueInput()
+    }
+    
+    func dequeueInput() {
+        while !inputQueue.isEmpty {
+            let buffer = Array(inputQueue[0..<9])
+            inputQueue = Array(inputQueue[buffer.count..<inputQueue.count])
+            guard var frame = Frame(bytes: buffer) else {
+                return
+            }
+            
+            if frame.length > 0 {
+                let count = Int(frame.length)
+                frame.payload = Array(inputQueue[0..<count])
+                inputQueue = Array(inputQueue[count..<inputQueue.count])
+            }
+            
+            delegate?.client(http: self, hasFrame: frame)
+        }
+    }
+    
+    public func disconnect() {
+        writeQueue.cancelAllOperations()
+        if let stream = inputStream {
+            stream.close()
+            CFReadStreamSetDispatchQueue(stream, nil)
+            stream.delegate = nil
+            inputStream = nil
+        }
+        if let stream = outputStream {
+            stream.close()
+            CFWriteStreamSetDispatchQueue(stream, nil)
+            stream.delegate = nil
+            outputStream = nil
+        }
+        isConnected = false
+        isConnecting = false
+    }
+    
+    public func write(frame: Frame) {
+        var out = frame.bytes()
+        if let payload = frame.payload {
+            out += payload
+        }
+        write(bytes: out)
+    }
+    
+    public func write(bytes: [UInt8]) {
+        guard isReadyToWrite else { return }
+        guard let output = outputStream else { fatalError() }
+        output.write(bytes, maxLength: bytes.count)
+    }
+}
+
+extension Http2: StreamDelegate {
+    
+    public func stream(_ aStream: Stream, handle eventCode: Stream.Event) {
+        switch eventCode {
+        case Stream.Event.openCompleted:
+            if aStream == outputStream {
+                isConnected = true
+                isReadyToWrite = true
+            }
+            break
+            
+        case Stream.Event.hasSpaceAvailable:
+            break
+            
+        case Stream.Event.hasBytesAvailable:
+            guard aStream == inputStream else { return }
+            processInput()
+            break
+            
+        case Stream.Event.endEncountered:
+            disconnect()
+            break
+            
+        case Stream.Event.errorOccurred:
+            disconnect()
+            break
+            
+        default:
+            print("unknown", eventCode)
+        }
+    }
+}
+
+// Utils
+
+let isLittleEndian = Int(OSHostByteOrder()) == OSLittleEndian
+let htonl  = isLittleEndian ? _OSSwapInt32 : { $0 } // host-to-network-long
