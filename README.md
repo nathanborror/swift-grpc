@@ -1,6 +1,12 @@
-# Swfit gRPC
+# Swift gRPC
 
-A very simple [gRPC](http://www.grpc.io) library to use with Apple's [swift-protobuf](https://github.com/apple/swift-protobuf). **Very much a work in progress**
+A very simple [gRPC][1] library to use with Apple's [swift-protobuf][2].
+
+---
+
+:warning: There is active work going on here that will result in API changes. :warning:
+
+---
 
 ## Usage
 
@@ -26,25 +32,21 @@ Build protobuf file with [swift-protobuf-plugin](https://github.com/apple/swift-
 
     $ protoc --swift_out=YourSwiftClient/Sources --go_out=plugins=grpc:. your-protobuf-file.proto
 
-Quick and scrappy example:
+Client code:
 
 ```swift
 import Foundation
 
 let url = URL(string: "http://localhost:8080")!
-let grpc = GRPC(url: url)
-
-while !grpc.isConnected {
-    sleep(1)
-}
+let session = GrpcSession(url: url)
 
 let hello = HelloRequest(text: "Hello, World")
-grpc.write(path: "/HelloService/Send", data: hello) { (bytes) in
-    let resp = try? HelloResponse(protobufBytes: bytes)
+
+try? session.write(path: "/HelloService/Send", data: hello) {
+    let resp = try? HelloResponse(protobufBytes: $0)
     print(resp)
 }
-
-sleep(5)
 ```
 
-Stay tuned 📺
+[1]:http://www.grpc.io
+[2]:https://github.com/apple/swift-protobuf

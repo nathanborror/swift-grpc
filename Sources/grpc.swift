@@ -8,25 +8,26 @@
 
 import Foundation
 import SwiftProtobuf
+import SwiftHttp2
 
-public class GRPC: NSObject {
+public class GrpcSession: NSObject {
 
     public typealias Callback = ([UInt8]) -> Void
 
-    let http: Http2
+    let session: Http2Session
     var callbacks: [StreamID: Callback]
 
     public init(url: URL) {
-        self.http = Http2(url: url)
+        self.session = Http2Session(url: url)
         self.callbacks = [:]
         super.init()
-        self.http.delegate = self
+        self.session.delegate = self
     }
 
-    public func write(path: String, data: ProtobufMessage, callback: @escaping Callback) {
-        self.http.connect()
+    public func write(path: String, data: ProtobufMessage, callback: @escaping Callback) throws {
+        self.session.connect()
 
-        let stream = http.streams.next()
+        let stream = session.streams.next()
         callbacks[stream] = callback
 
         let headers = [
@@ -35,25 +36,25 @@ public class GRPC: NSObject {
             (":path", path),
             ("content-type", "application/grpc+proto"),
             ("te", "trailers"),
-            ]
+        ]
         let frame = Frame(headers: headers, stream: stream, flags: .endHeaders)
-        http.write(frame: frame)
+        try session.write(frame: frame)
 
         let payload = try! data.serializeProtobufBytes()
         var bytes: [UInt8] = [0, 0, 0, 0, UInt8(payload.count)]
         bytes += payload
 
         let dataFrame = Frame(data: bytes, stream: stream, flags: .endStream)
-        http.write(frame: dataFrame)
+        try session.write(frame: dataFrame)
     }
 }
 
-extension GRPC: Http2Delegate {
+extension GrpcSession: Http2SessionDelegate {
 
-    public func clientConnected(http: Http2) {
+    public func sessionConnected(session: Http2Session) {
     }
 
-    public func client(http: Http2, hasFrame frame: Frame) {
+    public func session(session: Http2Session, hasFrame frame: Frame) {
 
         // Ignore frames with a stream ID of 0
         guard frame.stream > 0 else { return }
@@ -72,7 +73,7 @@ extension GRPC: Http2Delegate {
 
         // Disconnect if there are no more callbacks
         if callbacks.count == 0 {
-            http.disconnect()
+            session.disconnect()
         }
     }
 }
