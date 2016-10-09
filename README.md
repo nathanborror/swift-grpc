@@ -42,8 +42,8 @@ let session = GrpcSession(url: url)
 
 let hello = HelloRequest(text: "Hello, World")
 
-try? session.write(path: "/HelloService/Send", data: hello) {
-    let resp = try? HelloResponse(protobufBytes: $0)
+try? session.write(path: "/HelloService/Send", data: hello) { bytes in
+    let resp = try? HelloResponse(protobufBytes: bytes)
     print(resp)
 }
 ```
