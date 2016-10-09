@@ -10,34 +10,51 @@ import Foundation
 import SwiftProtobuf
 import SwiftHttp2
 
+enum HeaderField: String {
+    case method = ":method"
+    case scheme = ":scheme"
+    case path = ":path"
+    case contentType = "content-type"
+    case te = "te"
+    case token = "token"
+}
+
 public class GrpcSession: NSObject {
 
     public typealias Callback = ([UInt8]) -> Void
 
+    let url: URL
     let session: Http2Session
     var callbacks: [StreamID: Callback]
 
     public init(url: URL) {
+        self.url = url
         self.session = Http2Session(url: url)
         self.callbacks = [:]
+
         super.init()
+
         self.session.delegate = self
     }
 
-    public func write(path: String, data: ProtobufMessage, callback: @escaping Callback) throws {
+    public func write(path: String, data: ProtobufMessage, token: String? = nil, callback: @escaping Callback) throws {
         self.session.connect()
 
         let stream = session.streams.next()
         callbacks[stream] = callback
 
-        let headers = [
-            (":method", "POST"),
-            (":scheme", "http"),
-            (":path", path),
-            ("content-type", "application/grpc+proto"),
-            ("te", "trailers"),
-        ]
-        let frame = Frame(headers: headers, stream: stream, flags: .endHeaders)
+        var headers: [(HeaderField, String)] = [
+            (.method, "POST"),
+            (.scheme, url.scheme ?? "http"),
+            (.path, path),
+            (.contentType, "application/grpc+proto"),
+            (.te, "trailers"),
+            ]
+        if let token = token {
+            headers.append((.token, token))
+        }
+
+        let frame = Frame(headers: headers.map { ($0.0.rawValue, $0.1) }, stream: stream, flags: .endHeaders)
         try session.write(frame: frame)
 
         let payload = try! data.serializeProtobufBytes()
