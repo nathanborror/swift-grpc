@@ -9,6 +9,7 @@
 import Foundation
 import SwiftProtobuf
 import SwiftHttp2
+import SwiftHpack
 
 enum HeaderField: String {
     case method = ":method"
@@ -76,11 +77,27 @@ extension GrpcSession: Http2SessionDelegate {
         // Ignore frames with a stream ID of 0
         guard frame.stream > 0 else { return }
 
-        // Process data and send it over callback
-        if frame.type == .data {
-            guard let payload = frame.payload else { return }
+        switch frame.type {
+        case .headers:
+            guard let payload = frame.payload else {
+                break
+            }
+            let decoder = Decoder()
+            let listener = HeaderDecoder()
+            let headers = Bytes(existingBytes: payload)
+            do {
+                try decoder.decode(input: headers, headerListener: listener)
+            } catch {
+                print(error)
+            }
+            print(listener.headers) // debug
+        case .data:
+            guard let payload = frame.payload else {
+                break
+            }
             let bytes = Array(payload[5..<payload.count])
             callbacks[frame.stream]?(bytes)
+        default: break
         }
 
         // Remove callback when we receive a stream closed flag
@@ -92,5 +109,16 @@ extension GrpcSession: Http2SessionDelegate {
         if callbacks.count == 0 {
             session.disconnect()
         }
+    }
+}
+
+class HeaderDecoder: HeaderListener {
+
+    var headers = [(String, String)]()
+
+    func addHeader(name: [UInt8], value: [UInt8], sensitive: Bool) {
+        let nameStr = String(bytes: name, encoding: .utf8)!
+        let valueStr = String(bytes: value, encoding: .utf8)!
+        headers.append((nameStr, valueStr))
     }
 }
