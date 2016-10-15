@@ -59,10 +59,15 @@ public class GrpcSession: NSObject {
         try session.write(frame: frame)
 
         let payload = try! data.serializeProtobufBytes()
-        var bytes: [UInt8] = [0, 0, 0, 0, UInt8(payload.count)]
-        bytes += payload
 
-        let dataFrame = Frame(data: bytes, stream: stream, flags: .endStream)
+        var length = [UInt8]()
+        let l = htonl(UInt32(payload.count)) >> 8
+        length.append(UInt8(l & 0xFF))
+        length.append(UInt8((l >> 8) & 0xFF))
+        length.append(UInt8((l >> 16) & 0xFF))
+
+        let out: [UInt8] = [0, 0] + length + payload
+        let dataFrame = Frame(data: out, stream: stream, flags: .endStream)
         try session.write(frame: dataFrame)
     }
 }
