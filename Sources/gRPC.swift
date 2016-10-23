@@ -22,29 +22,29 @@ enum HeaderField: String {
 }
 
 public class GrpcSession: NSObject {
-
+    
     public typealias Callback = ([UInt8]) -> Void
-
+    
     let url: URL
     let session: Http2Session
     var callbacks: [StreamID: Callback]
-
+    
     public init(url: URL) {
         self.url = url
         self.session = Http2Session(url: url)
         self.callbacks = [:]
-
+        
         super.init()
-
+        
         self.session.delegate = self
     }
-
-    public func write(path: String, data: ProtobufMessage, token: String? = nil, callback: @escaping Callback) throws {
+    
+    public func write(path: String, message: ProtobufMessage, token: String? = nil, callback: @escaping Callback) throws {
         self.session.connect()
-
+        
         let stream = session.streams.next()
         callbacks[stream] = callback
-
+        
         var headers: [(HeaderField, String)] = [
             (.method, "POST"),
             (.scheme, url.scheme ?? "http"),
@@ -56,18 +56,21 @@ public class GrpcSession: NSObject {
         if let token = token {
             headers.append((.token, token))
         }
-
+        
         let frame = Frame(headers: headers.map { ($0.0.rawValue, $0.1) }, stream: stream, flags: .endHeaders)
         try session.write(frame: frame)
-
-        let payload = try! data.serializeProtobufBytes()
-
+        
+        let data = try! message.serializeProtobuf()
+        let payload = data.withUnsafeBytes {
+            [UInt8](UnsafeBufferPointer(start: $0, count: data.count))
+        }
+        
         var length = [UInt8]()
         let l = htonl(UInt32(payload.count)) >> 8
         length.append(UInt8(l & 0xFF))
         length.append(UInt8((l >> 8) & 0xFF))
         length.append(UInt8((l >> 16) & 0xFF))
-
+        
         let out: [UInt8] = [0, 0] + length + payload
         let dataFrame = Frame(data: out, stream: stream, flags: .endStream)
         try session.write(frame: dataFrame)
@@ -75,15 +78,15 @@ public class GrpcSession: NSObject {
 }
 
 extension GrpcSession: Http2SessionDelegate {
-
+    
     public func sessionConnected(session: Http2Session) {
     }
-
+    
     public func session(session: Http2Session, hasFrame frame: Frame) {
-
+        
         // Ignore frames with a stream ID of 0
         guard frame.stream > 0 else { return }
-
+        
         switch frame.type {
         case .headers:
             guard let payload = frame.payload else {
@@ -106,12 +109,12 @@ extension GrpcSession: Http2SessionDelegate {
             callbacks[frame.stream]?(bytes)
         default: break
         }
-
+        
         // Remove callback when we receive a stream closed flag
         if frame.flags == .streamClosed {
             callbacks.removeValue(forKey: frame.stream)
         }
-
+        
         // Disconnect if there are no more callbacks
         if callbacks.count == 0 {
             session.disconnect()
@@ -120,9 +123,9 @@ extension GrpcSession: Http2SessionDelegate {
 }
 
 class HeaderDecoder: HeaderListener {
-
+    
     var headers = [(String, String)]()
-
+    
     func addHeader(name: [UInt8], value: [UInt8], sensitive: Bool) {
         let nameStr = String(bytes: name, encoding: .utf8)!
         let valueStr = String(bytes: value, encoding: .utf8)!
