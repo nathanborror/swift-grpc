@@ -15,6 +15,7 @@ enum HeaderField: String {
     case method = ":method"
     case scheme = ":scheme"
     case path = ":path"
+    case authority = ":authority"
     case contentType = "content-type"
     case te = "te"
     case token = "token"
@@ -48,6 +49,7 @@ public class GrpcSession: NSObject {
             (.method, "POST"),
             (.scheme, url.scheme ?? "http"),
             (.path, path),
+            (.authority, url.host ?? "localhost"),
             (.contentType, "application/grpc+proto"),
             (.te, "trailers"),
             ]
