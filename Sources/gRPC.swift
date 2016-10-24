@@ -21,9 +21,14 @@ enum HeaderField: String {
     case token = "token"
 }
 
+public enum Result {
+    case value([UInt8])
+    case failure(ResponseError)
+}
+
 public class GrpcSession: NSObject {
     
-    public typealias Callback = ([UInt8]) -> Void
+    public typealias Callback = (Result) -> Void
     
     let url: URL
     let session: Http2Session
@@ -75,6 +80,22 @@ public class GrpcSession: NSObject {
         let dataFrame = Frame(data: out, stream: stream, flags: .endStream)
         try session.write(frame: dataFrame)
     }
+    
+    func handleResponse(headers: [String: String], for stream: StreamID) {
+        guard
+            let status = headers["grpc-status"],
+            let code = Int(status),
+            let message = headers["grpc-message"],
+            let error = ResponseError(code: code, message: message)
+            else { return }
+        callbacks[stream]?(.failure(error))
+    }
+    
+    func handleResponse(body: [UInt8]?, for stream: StreamID) {
+        guard var bytes = body else { return }
+        bytes = Array(bytes[5..<bytes.count])
+        callbacks[stream]?(.value(bytes))
+    }
 }
 
 extension GrpcSession: Http2SessionDelegate {
@@ -100,13 +121,9 @@ extension GrpcSession: Http2SessionDelegate {
             } catch {
                 print(error)
             }
-            print(listener.headers) // debug
+            handleResponse(headers: listener.headers, for: frame.stream)
         case .data:
-            guard let payload = frame.payload else {
-                break
-            }
-            let bytes = Array(payload[5..<payload.count])
-            callbacks[frame.stream]?(bytes)
+            handleResponse(body: frame.payload, for: frame.stream)
         default: break
         }
         
@@ -124,11 +141,11 @@ extension GrpcSession: Http2SessionDelegate {
 
 class HeaderDecoder: HeaderListener {
     
-    var headers = [(String, String)]()
+    var headers = [String: String]()
     
     func addHeader(name: [UInt8], value: [UInt8], sensitive: Bool) {
         let nameStr = String(bytes: name, encoding: .utf8)!
         let valueStr = String(bytes: value, encoding: .utf8)!
-        headers.append((nameStr, valueStr))
+        headers[nameStr] = valueStr
     }
 }
